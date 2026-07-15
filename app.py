@@ -17,9 +17,9 @@ import slide_check as sc
 st.set_page_config(page_title="Slide Reviewer", page_icon="\U0001F4D0", layout="centered")
 
 
-def review_path(path):
+def review_path(path, marking_variant=None):
     prs = Presentation(str(path))
-    return prs, sc.review(prs)
+    return prs, sc.review(prs, marking_variant=marking_variant)
 
 
 def fix_all_bytes(path):
@@ -51,8 +51,21 @@ if mode == "Single deck (upload)":
         tmp.flush()
         st.session_state["deck_path"] = tmp.name
         st.session_state["deck_name"] = uploaded.name
+        st.session_state["marking_choice"] = "auto"  # reset override for the new deck
 
-    prs, issues = review_path(st.session_state["deck_path"])
+    variant_labels = {v["id"]: v["label"] for v in sc.CUI_VARIANTS}
+    detected = sc.detect_marking_variant(Presentation(st.session_state["deck_path"]))
+    choice = st.selectbox(
+        "This deck's approved marking",
+        ["auto"] + list(variant_labels),
+        format_func=lambda vid: f"Auto-detect (currently: {variant_labels[detected]})"
+                                 if vid == "auto" else variant_labels[vid],
+        key="marking_choice",
+        help="The deck must use exactly one marking variant throughout. Pick it once "
+             "here and every slide is checked against it.")
+    marking_variant = None if choice == "auto" else choice
+
+    prs, issues = review_path(st.session_state["deck_path"], marking_variant)
     n_slides = len(list(prs.slides))
     st.subheader(f"{uploaded.name} \u2014 {n_slides} slides")
 

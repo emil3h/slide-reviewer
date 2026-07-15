@@ -1,15 +1,16 @@
 # 🛝 Slide Reviewer
 
-Slide Reviewer is a tool designed to automatically check PowerPoint presentations (`.pptx`) against specific formatting and compliance rules. It can identify issues with page numbering, CUI markings, and font consistency, and can automatically fix many of these issues.
+Slide Reviewer is a tool designed to automatically check PowerPoint presentations (`.pptx`) against specific formatting and compliance rules. It can identify issues with page numbering, control markings, logo placement, and font consistency, and can automatically fix many of these issues.
 
 ## 🚀 Features
 
 - **Automated Compliance Checks**:
-    - **Page Numbers**: Verifies that page numbers are present and in the correct numerical order.
-    - **CUI Markings**: Ensures the required "Reviewed and determined not to contain CUI" marking is present, worded exactly, and formatted correctly (Arial 8, Bold, no highlight).
+    - **Page Numbers**: Verifies that exactly one page number is present, in the correct numerical order, and formatted Arial 8pt.
+    - **Markings**: Ensures exactly one of the two approved control markings is present, worded exactly, formatted correctly, and consistent across the deck.
+    - **Logo**: Verifies a logo is present in the top-left corner and at least 3" wide.
     - **Font Consistency**:
-        - Headings: Checks for Arial 24pt.
-        - Body Text: Checks for Arial 16pt.
+        - Headings: Checks for Arial, exactly 24pt, Bold.
+        - Body Text: Checks for Arial, at least 16pt.
 - **Interactive Web Interface**: A Streamlit-based UI to upload decks, review issues per slide, and selectively apply fixes.
 - **Batch Processing**: Ability to review an entire folder of presentations and download all corrected versions in a single ZIP file.
 - **CLI Tool**: A lightweight command-line interface for quick reports and bulk fixing.
@@ -53,14 +54,21 @@ This will create a new file named `corrected_your_presentation.pptx`.
 
 ## ⚙️ Rules & Logic
 
-The tool applies the following rules to every slide (except the title slide and specific "Back-up Slides" dividers):
+The tool applies the following rules to every slide except the title slide. On
+"Back-up Slides" divider slides, only the **Logo** and **Marking** checks apply; page
+number, heading, and body checks are skipped.
 
 | Element | Required Format | Auto-Fixable? |
 | :--- | :--- | :--- |
-| **Page Number** | Present and sequential | Yes |
-| **CUI Marking** | "Reviewed and determined not to contain CUI" (Arial 8, Bold, no highlight) | Yes |
-| **Heading** | Arial 24pt | Yes |
-| **Body Text** | Arial 16pt | Yes |
+| **Page Number** | Present, exactly one, bottom-right, Arial 8pt, sequential | Yes (missing/out-of-order); duplicates are flagged for manual removal |
+| **Marking** | Exactly one of two approved variants, deck-wide consistent: "Reviewed and determined not to contain CUI" (footer, Arial 8, Bold, no highlight) or "CUI//SP-EXPT" (header, Arial 17, Bold, no highlight) | Yes (missing/wrong wording/wrong variant/format); "both present" is flagged for manual removal |
+| **Logo** | Picture, top-left corner (within 0.25"), width ≥ 3" | No — flagged for manual fix |
+| **Heading** | Arial, exactly 24pt, Bold | Yes |
+| **Body Text** | Arial, at least 16pt (larger is fine) | Yes |
+
+Elements correctly provided by the slide master (logo, marking, page number) count as
+present/compliant for slides that don't override them — only an explicit, non-compliant
+override on the slide itself is flagged.
 
 ## 📂 Project Structure
 - `app.py`: Streamlit web application.
