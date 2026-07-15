@@ -1,0 +1,131 @@
+{
+  "schema_version": "2.0",
+  "meta": {
+    "name": "Slide Formatting Compliance Rules",
+    "source_rubric": "human_review_rubric.md",
+    "units": {
+      "position_and_dimension": "inches",
+      "font_size": "points"
+    },
+    "slide_size_in": { "width": 13.333, "height": 7.5 }
+  },
+
+  "scope": {
+    "skip_title_slide": true,
+    "title_slide_index": 1,
+    "trust_inherited": true,
+    "resolve_theme_fonts": true
+  },
+
+  "text_normalization": {
+    "lowercase": true,
+    "collapse_whitespace": true,
+    "strip_trailing_period": true,
+    "strip_hyphens_for_section_match": true
+  },
+
+  "sections": {
+    "backup_slides": {
+      "trigger_texts": [
+        "back-up slides",
+        "backup slides",
+        "back up slide",
+        "backup slide"
+      ],
+      "match": "normalized_exact",
+      "scope": "divider_slide_only",
+      "apply_checks": ["logo", "marking"],
+      "skip_checks": ["heading", "body", "page_number"]
+    }
+  },
+
+  "rules": {
+    "heading": {
+      "enabled": true,
+      "selector": "title_placeholder_or_topmost_text_box",
+      "font_name": "Arial",
+      "size_pt": 24,
+      "size_comparison": "exact",
+      "bold": true
+    },
+
+    "body": {
+      "enabled": true,
+      "selector": "all_other_body_text",
+      "font_name": "Arial",
+      "size_pt": 16,
+      "size_comparison": "min"
+    },
+
+    "page_number": {
+      "enabled": true,
+      "required": true,
+      "count": 1,
+      "count_comparison": "exact",
+      "font_name": "Arial",
+      "size_pt": 8,
+      "position": {
+        "corner": "bottom_right",
+        "min_left_in": 8.0,
+        "min_top_in": 6.0
+      },
+      "sequential_order": true,
+      "presence_source": "slide_own_shapes",
+      "master_provides_page_numbers": false,
+      "carriers": ["typed_number_box", "slide_number_placeholder"],
+      "number_pattern": "^\\d{1,3}$",
+      "insert_anchor_in": { "left": 12.4, "top": 6.95, "width": 0.6, "height": 0.3 }
+    },
+
+    "logo": {
+      "enabled": true,
+      "required": true,
+      "shape_type": "picture",
+      "position": {
+        "corner": "top_left",
+        "corner_tolerance_in": 0.25
+      },
+      "min_width_in": 3.0,
+      "inherited_counts": true
+    },
+
+    "marking": {
+      "enabled": true,
+      "policy": "exactly_one_variant_deckwide",
+      "count_per_slide": 1,
+      "count_comparison": "exact",
+      "consistent_variant": true,
+      "variant_source": "master_then_majority",
+      "inherited_counts": true,
+      "match": {
+        "wording": "normalized_exact",
+        "fuzzy_like_ratio": 0.7
+      },
+      "formatting_strict": true,
+      "variants": [
+        {
+          "id": "not_cui_footer",
+          "label": "Not-CUI footer",
+          "text": "Reviewed and determined not to contain CUI",
+          "placement": "footer",
+          "font_name": "Arial",
+          "size_pt": 8,
+          "bold": true,
+          "highlight": false,
+          "insert_anchor_in": { "left": 4.42, "top": 6.95, "width": 4.5, "height": 0.3, "align": "center" }
+        },
+        {
+          "id": "cui_header",
+          "label": "CUI header banner",
+          "text": "CUI//SP-EXPT",
+          "placement": "header",
+          "font_name": "Arial",
+          "size_pt": 17,
+          "bold": true,
+          "highlight": false,
+          "insert_anchor_in": { "left": 5.14, "top": 0.0, "width": 3.04, "height": 0.4, "align": "center" }
+        }
+      ]
+    }
+  }
+}
