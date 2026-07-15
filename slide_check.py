@@ -7,7 +7,7 @@ heading/body checks on "Back-up Slides" dividers):
   2. Exactly one approved control marking (Not-CUI footer or CUI header banner),
      consistent deck-wide, worded exactly, formatted per its variant, no highlight.
   3. Logo present top-left (within 0.25"), width >= 3" (applies even on dividers).
-  4. Heading (top-most text box) Arial 24 Bold.
+  4. Heading (top-most text box) Arial 24 Bold, black.
   5. All other body text Arial, >= 16pt.
 
 Public API used by app.py:
@@ -31,9 +31,11 @@ from pptx.dml.color import RGBColor
 from pptx.oxml.ns import qn
 from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import PP_PLACEHOLDER, MSO_SHAPE_TYPE
+from pptx.enum.dml import MSO_COLOR_TYPE
 
 # ---- rules -----------------------------------------------------------------
 HEADING_FONT, HEADING_SIZE, HEADING_BOLD = "Arial", 24.0, True
+HEADING_COLOR = "000000"  # heading text must be black
 BODY_FONT, BODY_SIZE = "Arial", 16.0
 PAGENO_FONT, PAGENO_SIZE = "Arial", 8.0
 PAGENO_ANCHOR_IN = (12.4, 6.95, 0.6, 0.3)
@@ -106,6 +108,19 @@ def is_number_text(shape):
     return shape.has_text_frame and bool(re.fullmatch(r"\d{1,3}", text_of(shape)))
 
 
+def slidenum_has_value(shape):
+    """A slide-number placeholder only counts as a real page number if it
+    actually carries one: an auto <a:fld type="slidenum"> field, or literal
+    digit text. An EMPTY slide-number placeholder renders nothing, so a slide
+    whose number was deleted (placeholder left behind) must NOT read as
+    numbered."""
+    if not is_slidenum(shape):
+        return False
+    if 'type="slidenum"' in _safe_xml(shape):
+        return True
+    return any(c.isdigit() for c in text_of(shape))
+
+
 def is_footer_ph(shape):
     try:
         return shape.is_placeholder and \
@@ -130,7 +145,9 @@ def has_pageno(slide):
     if MASTER_PROVIDES_PAGE_NUMBERS:
         return True
     for s in slide.shapes:
-        if is_pageno(s) or is_number_text(s) or is_slidenum(s):
+        if is_pageno(s) or is_number_text(s):
+            return True
+        if is_slidenum(s) and slidenum_has_value(s):
             return True
         if is_footer_ph(s) and ("slidenum" in _safe_xml(s)
                                 or any(c.isdigit() for c in text_of(s))):
@@ -154,8 +171,31 @@ def literal_pageno_shape(slide):
     return None
 
 
+def _has_slidenum_field(shape):
+    return 'type="slidenum"' in _safe_xml(shape)
+
+
+def _pageno_value_and_shape(slide):
+    """Return (carrier_shape, numeric_value) for the page number *shown* on the
+    slide, or (None, None). Reads the displayed digits from a typed number box,
+    a literal slide-number placeholder, OR an auto slide-number field (whose
+    rendered text may also include a stray typed digit, e.g. an auto "5" with an
+    extra typed "5" showing as "55"). Digits are extracted from the full text so
+    such mixed carriers are evaluated on what the viewer actually sees."""
+    for s in slide.shapes:
+        take = is_pageno(s) or is_number_text(s) or (is_slidenum(s) and slidenum_has_value(s))
+        if not take:
+            continue
+        digits = "".join(c for c in text_of(s) if c.isdigit())
+        if digits:
+            return s, int(digits)
+    return None, None
+
+
 def _pageno_shapes(slide):
-    return [s for s in slide.shapes if is_pageno(s) or is_number_text(s) or is_slidenum(s)]
+    return [s for s in slide.shapes
+            if is_pageno(s) or is_number_text(s)
+            or (is_slidenum(s) and slidenum_has_value(s))]
 
 
 def _variant_by_id(vid):
@@ -248,9 +288,33 @@ def _slide_marking_shapes(slide):
     return out
 
 
+def _is_placeholder(shape):
+    try:
+        return shape.is_placeholder
+    except Exception:
+        return False
+
+
 def _slide_marking_ids(slide):
+    """Marking ids actually DISPLAYED on this slide.
+
+    Counts (a) slide-level marking shapes — including an instantiated footer
+    placeholder that carries the text — plus (b) inherited NON-placeholder
+    shapes from the layout/master (e.g. the CUI header text box), which really
+    do render on every slide.
+
+    Inherited *placeholder prototypes* (a footer placeholder defined only on the
+    master) are NOT counted: a placeholder renders on a slide only when that
+    slide instantiates it, and that instance is already picked up by (a). Counting
+    the master prototype made every slide look like it had the footer marking, so
+    slides showing only the header were wrongly flagged "both present"."""
     ids = set(_slide_marking_shapes(slide))
-    ids |= {v["id"] for s in inherited_shapes(slide) for v in [matching_variant(s)] if v}
+    for s in inherited_shapes(slide):
+        if _is_placeholder(s):
+            continue
+        v = matching_variant(s)
+        if v:
+            ids.add(v["id"])
     return ids
 
 
@@ -322,9 +386,22 @@ def heading_shape(slide):
     return best
 
 
+def explicit_rgb(run):
+    """The run's explicitly-set RGB colour as a 6-hex string, or None when the
+    colour is inherited or theme-linked (which we trust, to avoid false
+    positives on text that simply follows the template default)."""
+    try:
+        c = run.font.color
+        if c is not None and c.type == MSO_COLOR_TYPE.RGB:
+            return str(c.rgb)
+    except Exception:
+        pass
+    return None
+
+
 # ---- review (produces Issues) ----------------------------------------------
 def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, idp, issues,
-                  size_cmp="exact", want_bold=None):
+                  size_cmp="exact", want_bold=None, want_color=None):
     for r in runs(shape):
         name = effective_font_name(r.font.name, slide)
         if name is not None and name != want_font:
@@ -350,6 +427,15 @@ def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, id
                 issues.append(Issue(f"{idp}-bold", slide_no, "bold",
                                     f"{where} is not bold; should be Bold.", True,
                                     {"op": "font_bold", "value": want_bold, **target}))
+                break
+    if want_color is not None:
+        for r in runs(shape):
+            rgb = explicit_rgb(r)
+            if rgb is not None and rgb.upper() != want_color.upper():
+                issues.append(Issue(f"{idp}-color", slide_no, "color",
+                                    f"{where} font color is #{rgb}; should be black "
+                                    f"(#{want_color}).", True,
+                                    {"op": "font_color", "value": want_color, **target}))
                 break
 
 
@@ -463,7 +549,7 @@ def _review_slide(slide, slide_no, canonical, issues):
     else:
         _font_issues(head, HEADING_FONT, HEADING_SIZE, "Heading", slide, slide_no,
                      {"target": "heading"}, f"s{slide_no}-heading", issues,
-                     want_bold=HEADING_BOLD)
+                     want_bold=HEADING_BOLD, want_color=HEADING_COLOR)
 
     for shp in slide.shapes:
         if not shp.has_text_frame or not text_of(shp):
@@ -497,23 +583,34 @@ def _deck_marking_variant(slides, start):
 
 
 def _review_order(slides, start, issues):
-    checked = [(idx, slide) for idx, slide in enumerate(slides, start=1)
-               if idx >= start and not is_backup_divider(slide)]
-    anchor_pos = anchor_num = None
-    for pos, (idx, slide) in enumerate(checked):
-        sh = literal_pageno_shape(slide)
-        if sh is None:
+    """Flag page numbers that don't match their sequential position.
+
+    The expected number for a slide is its 1-based deck position plus an offset
+    learned from the first slide that actually shows a number (so decks that
+    start numbering at something other than 1 still work). This reads the value
+    shown by literal boxes, literal slide-number placeholders, AND auto
+    slide-number fields (including a field with a stray extra digit rendering as
+    e.g. "55"), so out-of-order numbers in any carrier are caught."""
+    offset = None
+    for idx, slide in enumerate(slides, start=1):
+        _, val = _pageno_value_and_shape(slide)
+        if val is not None:
+            offset = val - idx
+            break
+    if offset is None:
+        return
+    for idx, slide in enumerate(slides, start=1):
+        if idx < start or is_backup_divider(slide):
             continue
-        val = int(text_of(sh))
-        if anchor_num is None:
-            anchor_pos, anchor_num = pos, val
+        sh, val = _pageno_value_and_shape(slide)
+        if val is None:
             continue
-        expected = anchor_num + (pos - anchor_pos)
+        expected = idx + offset
         if val != expected:
             issues.append(Issue(f"s{idx}-pageno-order", idx, "page_number",
                                 f"Page number is {val} but should be {expected} "
                                 f"for its position (out of order).", True,
-                                {"op": "set_number", "shape_id": sh.shape_id,
+                                {"op": "set_pageno_value", "shape_id": sh.shape_id,
                                  "value": expected}))
 
 
@@ -551,7 +648,46 @@ def set_text(shape, new_text):
         shape.text_frame.paragraphs[0].add_run().text = new_text
 
 
+def _set_pageno_value(shape, value):
+    """Make the page number read `value`. If the carrier holds an auto
+    slide-number field, drop any stray literal runs (the extra typed digit that
+    made it show e.g. "55") and refresh the field's cached value, so the field
+    keeps auto-numbering. Otherwise rewrite the literal text and re-apply the
+    page-number font."""
+    if not shape.has_text_frame:
+        return
+    if _has_slidenum_field(shape):
+        for p in shape.text_frame.paragraphs:
+            for r in list(p.runs):
+                r._r.getparent().remove(r._r)
+        for fld in shape._element.findall(".//" + qn("a:fld")):
+            t = fld.find(qn("a:t"))
+            if t is not None:
+                t.text = str(value)
+    else:
+        set_text(shape, str(value))
+        for r in runs(shape):
+            r.font.name = PAGENO_FONT
+            r.font.size = Pt(PAGENO_SIZE)
+
+
+def _empty_slidenum_ph(slide):
+    for s in slide.shapes:
+        if is_slidenum(s) and not slidenum_has_value(s):
+            return s
+    return None
+
+
 def add_pageno(slide, n):
+    # Prefer filling an existing (empty) slide-number placeholder so the number
+    # lands in the template's intended spot instead of a duplicate floating box.
+    ph = _empty_slidenum_ph(slide)
+    if ph is not None:
+        set_text(ph, str(n))
+        for r in runs(ph):
+            r.font.name = PAGENO_FONT
+            r.font.size = Pt(PAGENO_SIZE)
+        return
     left, top, width, height = PAGENO_ANCHOR_IN
     box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     box.text_frame.margin_left = 0
@@ -608,12 +744,22 @@ def _apply_fix(slide, fix):
         if sh:
             for r in runs(sh):
                 r.font.bold = fix["value"]
+    elif op == "font_color":
+        sh = heading_shape(slide) if fix.get("target") == "heading" \
+            else _shape_by_id(slide, fix.get("shape_id"))
+        if sh:
+            for r in runs(sh):
+                r.font.color.rgb = RGBColor.from_string(fix["value"])
     elif op == "add_pageno":
         add_pageno(slide, fix["n"])
     elif op == "set_number":
         sh = _shape_by_id(slide, fix.get("shape_id"))
         if sh:
             set_text(sh, str(fix["value"]))
+    elif op == "set_pageno_value":
+        sh = _shape_by_id(slide, fix.get("shape_id"))
+        if sh:
+            _set_pageno_value(sh, fix["value"])
     elif op == "add_marking":
         variant = _variant_by_id(fix["variant"])
         box = add_marking_box(slide, variant)

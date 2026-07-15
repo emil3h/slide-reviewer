@@ -1,6 +1,6 @@
 # 🛝 Slide Reviewer
 
-Slide Reviewer is a tool designed to automatically check PowerPoint presentations (`.pptx`) against specific formatting and compliance rules. It can identify issues with page numbering, control markings, logo placement, and font consistency, and can automatically fix many of these issues.
+Slide Reviewer is a tool designed to automatically check PowerPoint presentations (`.pptx`) against specific formatting and compliance rules. It can identify issues with page numbering, control markings, logo placement, and font consistency, and can automatically fix many of these issues..
 
 ## 🚀 Features
 
