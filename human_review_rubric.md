@@ -20,16 +20,18 @@ to the remaining slides.
 Applies to every slide except the [title slide](#title-slide-fully-exempt) and
 [back-up slides](#5-back-up-slides).
 
-| Element | Typeface | Size | Weight |
-|---|---|---|---|
-| **Heading** (the slide's title / top-most heading text box) | Arial | **exactly 24 pt** | **Bold** |
-| **Body** (all other body text) | Arial | **≥ 16 pt** (minimum, larger is fine) | — |
+| Element | Typeface | Size | Weight | Color |
+|---|---|---|---|---|
+| **Heading** (the slide's title / top-most heading text box) | Arial | **exactly 24 pt** | **Bold** | **Black** (#000000) |
+| **Body** (all other body text) | Arial | **≥ 16 pt** (minimum, larger is fine) | — | — |
 
 Rules:
 
 - **Every** run of text on the slide must be **Arial** — headings, body, and markings alike.
   (Marking and page-number sizes are governed by their own sections below.)
-- The **heading** must be Arial **24 pt Bold** — 24 is exact, and bold is required.
+- The **heading** must be Arial **24 pt Bold**, colored **black** (#000000) — 24 is exact, bold
+  is required, and an explicit non-black heading color (e.g. red) is a deviation. Text using the
+  theme/inherited default color is trusted (only an explicit non-black override is flagged).
 - **Body** text must be Arial and **at least 16 pt**. Sizes above 16 pt pass; anything under
   16 pt is a deviation.
 - Font names that resolve through the theme (e.g. `+mn-lt`, `+mj-lt`) must resolve to Arial;
@@ -117,7 +119,7 @@ page-number, logo, or marking checks are applied to it. All rules begin at the s
 
 For each slide **except the title slide** (fully exempt), confirm:
 
-- [ ] Heading is Arial, 24 pt, Bold *(skip on back-up slides)*
+- [ ] Heading is Arial, 24 pt, Bold, black *(skip on back-up slides)*
 - [ ] All body text is Arial, ≥ 16 pt *(skip on back-up slides)*
 - [ ] Exactly one page number, bottom-right, Arial 8 pt, in sequential order *(skip on back-up slides)*
 - [ ] Logo present top-left, corner-aligned, width ≥ 3"
@@ -145,3 +147,5 @@ All interpretation questions have been resolved; the rules above reflect them.
 - **Logo identification.** A **picture** shape whose top-left is within **≤ 0.25"** of the
   (0, 0) corner and whose **width ≥ 3"**; a master-level logo satisfies the check for all
   slides. *(§3)*
+- **Heading color = black.** Heading text must be black (#000000); an explicit non-black
+  color is a deviation, while theme/inherited default color is trusted. *(§1)*
