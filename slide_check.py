@@ -32,6 +32,7 @@ from pptx.oxml.ns import qn
 from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import PP_PLACEHOLDER, MSO_SHAPE_TYPE
 from pptx.enum.dml import MSO_COLOR_TYPE
+from lxml import etree
 
 # ---- rules -----------------------------------------------------------------
 HEADING_FONT, HEADING_SIZE, HEADING_BOLD = "Arial", 24.0, True
@@ -91,42 +92,33 @@ def is_pageno(shape):
     return Emu(shape.left).inches > 7.0 and Emu(shape.top).inches > 6.0
 
 
-def is_slidenum(shape):
+def _ph_type(shape):
+    """Get placeholder type or None."""
     try:
-        if shape.is_placeholder and \
-                shape.placeholder_format.type == PP_PLACEHOLDER.SLIDE_NUMBER:
-            return True
-    except Exception:
-        pass
-    try:
-        return "slidenum" in shape._element.xml.lower()
-    except Exception:
-        return False
+        return shape.placeholder_format.type if shape.is_placeholder else None
+    except:
+        return None
 
+def is_slidenum(shape):
+    return _ph_type(shape) == PP_PLACEHOLDER.SLIDE_NUMBER or \
+           "slidenum" in _safe_xml(shape)
 
 def is_number_text(shape):
     return shape.has_text_frame and bool(re.fullmatch(r"\d{1,3}", text_of(shape)))
 
-
 def slidenum_has_value(shape):
-    """A slide-number placeholder only counts as a real page number if it
-    actually carries one: an auto <a:fld type="slidenum"> field, or literal
-    digit text. An EMPTY slide-number placeholder renders nothing, so a slide
-    whose number was deleted (placeholder left behind) must NOT read as
-    numbered."""
-    if not is_slidenum(shape):
-        return False
-    if 'type="slidenum"' in _safe_xml(shape):
-        return True
-    return any(c.isdigit() for c in text_of(shape))
-
+    return is_slidenum(shape) and \
+           ('type="slidenum"' in _safe_xml(shape) or any(c.isdigit() for c in text_of(shape)))
 
 def is_footer_ph(shape):
-    try:
-        return shape.is_placeholder and \
-            shape.placeholder_format.type == PP_PLACEHOLDER.FOOTER
-    except Exception:
-        return False
+    return _ph_type(shape) == PP_PLACEHOLDER.FOOTER
+
+def is_title_ph(shape):
+    return _ph_type(shape) == PP_PLACEHOLDER.TITLE
+
+def is_body_ph(shape):
+    pt = _ph_type(shape)
+    return pt in (PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.OBJECT, PP_PLACEHOLDER.SUBTITLE)
 
 
 def is_pageno_carrier(shape):
@@ -139,6 +131,32 @@ def _safe_xml(shape):
         return shape._element.xml.lower()
     except Exception:
         return ""
+
+
+def _slidenum_formatting(shape):
+    """Extract explicit formatting overrides from slidenum placeholder XML."""
+    try:
+        root = etree.fromstring(shape._element.xml.encode('utf-8'))
+        ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        rPr = root.find(f".//{ns}rPr")
+        if rPr is None:
+            return {}
+
+        result = {}
+        if (latin := rPr.find(f"{ns}latin")) is not None:
+            result['font'] = latin.get('typeface')
+        if (sz := rPr.get('sz')):
+            result['size'] = round(int(sz) / 100.0, 1)
+        if (solidFill := rPr.find(f"{ns}solidFill")) is not None:
+            # Check for explicit RGB color
+            if (srgb := solidFill.find(f"{ns}srgbClr")) is not None:
+                result['color'] = srgb.get('val')
+            # Check for scheme/theme color
+            elif solidFill.find(f"{ns}schemeClr") is not None:
+                result['color'] = 'scheme'  # Mark as having a color override (scheme color)
+        return result
+    except:
+        return {}
 
 
 def has_pageno(slide):
@@ -194,7 +212,8 @@ def _pageno_value_and_shape(slide):
 
 def _pageno_shapes(slide):
     return [s for s in slide.shapes
-            if is_pageno(s) or is_number_text(s)
+            if is_pageno(s)
+            or (is_number_text(s) and not is_slidenum(s))
             or (is_slidenum(s) and slidenum_has_value(s))]
 
 
@@ -340,6 +359,7 @@ def _remove_variant_shapes(slide, variant):
 _THEME_RT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme"
 _A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 _theme_cache = {}
+_master_pageno_cache = {}
 
 
 def _theme_fonts(slide):
@@ -352,7 +372,6 @@ def _theme_fonts(slide):
         return _theme_cache[key]
     major = minor = None
     try:
-        from lxml import etree
         blob = master.part.part_related_by(_THEME_RT).blob
         root = etree.fromstring(blob)
         mj = root.find(f".//{_A_NS}fontScheme/{_A_NS}majorFont/{_A_NS}latin")
@@ -373,7 +392,22 @@ def effective_font_name(name, slide):
     return name
 
 
+def _master_slidenum(slide):
+    """Get master's slidenum placeholder, cached."""
+    try:
+        master = slide.slide_layout.slide_master
+        key = id(master)
+        if key not in _master_pageno_cache:
+            _master_pageno_cache[key] = next((s for s in master.shapes if is_slidenum(s)), None)
+        return _master_pageno_cache[key]
+    except:
+        return None
+
+
 def heading_shape(slide):
+    for shp in slide.shapes:
+        if is_title_ph(shp):
+            return shp
     best, best_top = None, None
     for shp in slide.shapes:
         if not shp.has_text_frame or not text_of(shp):
@@ -401,7 +435,7 @@ def explicit_rgb(run):
 
 # ---- review (produces Issues) ----------------------------------------------
 def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, idp, issues,
-                  size_cmp="exact", want_bold=None, want_color=None):
+                  size_cmp="exact", want_bold=None, want_color=None, want_italic=None, want_underline=None):
     for r in runs(shape):
         name = effective_font_name(r.font.name, slide)
         if name is not None and name != want_font:
@@ -423,7 +457,8 @@ def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, id
             break
     if want_bold is not None:
         for r in runs(shape):
-            if r.font.bold is not None and r.font.bold != want_bold:
+            # Flag if explicitly set to wrong value OR not set at all (None)
+            if r.font.bold != want_bold:
                 issues.append(Issue(f"{idp}-bold", slide_no, "bold",
                                     f"{where} is not bold; should be Bold.", True,
                                     {"op": "font_bold", "value": want_bold, **target}))
@@ -436,6 +471,20 @@ def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, id
                                     f"{where} font color is #{rgb}; should be black "
                                     f"(#{want_color}).", True,
                                     {"op": "font_color", "value": want_color, **target}))
+                break
+    if want_italic is not None:
+        for r in runs(shape):
+            if r.font.italic and r.font.italic != want_italic:
+                issues.append(Issue(f"{idp}-italic", slide_no, "italic",
+                                    f"{where} is italic; should not be italic.", True,
+                                    {"op": "font_italic", "value": want_italic, **target}))
+                break
+    if want_underline is not None:
+        for r in runs(shape):
+            if r.font.underline and r.font.underline != want_underline:
+                issues.append(Issue(f"{idp}-underline", slide_no, "underline",
+                                    f"{where} is underlined; should not be underlined.", True,
+                                    {"op": "font_underline", "value": want_underline, **target}))
                 break
 
 
@@ -482,7 +531,6 @@ def _review_marking(slide, slide_no, canonical, issues):
             issues.append(Issue(f"s{slide_no}-marking-missing", slide_no, "marking",
                                 f"Missing required marking: \u201c{canonical['text']}\u201d.",
                                 True, {"op": "add_marking", "variant": canonical["id"]}))
-        return
     else:
         vid = next(iter(effective_ids))
         if vid != canonical["id"]:
@@ -494,7 +542,17 @@ def _review_marking(slide, slide_no, canonical, issues):
                                 sh is not None,
                                 {"op": "fix_marking_text", "shape_id": sh.shape_id,
                                  "variant": canonical["id"]} if sh is not None else {}))
-            return
+
+    # Check for incorrectly-worded marking_like shapes (close but not exact)
+    # even when a valid marking is present elsewhere on the slide or from master
+    if marking_like and effective_ids:
+        for sh in marking_like:
+            issues.append(Issue(f"s{slide_no}-marking-wording-{sh.shape_id}",
+                                slide_no, "marking",
+                                f"Marking wording differs; must read exactly "
+                                f"\u201c{canonical['text']}\u201d.", True,
+                                {"op": "fix_marking_text", "shape_id": sh.shape_id,
+                                 "variant": canonical["id"]}))
 
     # Format-check every slide-level marking shape present, independent of the
     # both-present branch above \u2014 a marking can be both duplicated *and*
@@ -536,11 +594,49 @@ def _review_slide(slide, slide_no, canonical, issues):
             issues.append(Issue(f"s{slide_no}-pageno-dup", slide_no, "page_number",
                                 f"{len(pn_shapes)} page-number elements found; "
                                 "exactly one is required.", False, {}))
-        elif pn_shapes and is_number_text(pn_shapes[0]) and not is_slidenum(pn_shapes[0]):
+        elif pn_shapes:
             sh = pn_shapes[0]
-            _font_issues(sh, PAGENO_FONT, PAGENO_SIZE, "Page number", slide, slide_no,
-                         {"target": "shape", "shape_id": sh.shape_id},
-                         f"s{slide_no}-pageno", issues)
+            # For slidenum placeholders, check position and formatting overrides
+            if is_slidenum(sh):
+                if (master := _master_slidenum(slide)) and sh.left and sh.top:
+                    m_left, m_top = Emu(master.left).inches, Emu(master.top).inches
+                    s_left, s_top = Emu(sh.left).inches, Emu(sh.top).inches
+                    if abs(s_left - m_left) > 0.1 or abs(s_top - m_top) > 0.1:
+                        issues.append(Issue(f"s{slide_no}-pageno-moved", slide_no, "page_number",
+                                            f"Page number moved from master ({m_left:.2f}\", {m_top:.2f}\") "
+                                            f"to ({s_left:.2f}\", {s_top:.2f}\").", True,
+                                            {"op": "reset_pageno_position", "shape_id": sh.shape_id,
+                                             "left": m_left, "top": m_top}))
+
+                fmt = _slidenum_formatting(sh)
+                if (font := fmt.get('font')) and font != PAGENO_FONT:
+                    issues.append(Issue(f"s{slide_no}-pageno-font-override", slide_no, "page_number",
+                                        f"Page number font overridden to {font}; should inherit {PAGENO_FONT}.",
+                                        True, {"op": "clear_pageno_formatting", "shape_id": sh.shape_id, "clear": "font"}))
+                if (size := fmt.get('size')) and size != PAGENO_SIZE:
+                    issues.append(Issue(f"s{slide_no}-pageno-size-override", slide_no, "page_number",
+                                        f"Page number size overridden to {size}pt; should inherit {int(PAGENO_SIZE)}pt.",
+                                        True, {"op": "clear_pageno_formatting", "shape_id": sh.shape_id, "clear": "size"}))
+                if (color := fmt.get('color')):
+                    issues.append(Issue(f"s{slide_no}-pageno-color-override", slide_no, "page_number",
+                                        f"Page number color overridden to #{color}; should inherit from master.",
+                                        True, {"op": "clear_pageno_formatting", "shape_id": sh.shape_id, "clear": "color"}))
+            # Check position and font for typed number boxes
+            elif is_number_text(sh) and not is_slidenum(sh):
+                # Position check
+                if sh.left is not None and sh.top is not None:
+                    left_in = Emu(sh.left).inches
+                    top_in = Emu(sh.top).inches
+                    # Check if in bottom-right area (general check)
+                    if left_in <= 7.0 or top_in <= 6.0:
+                        issues.append(Issue(f"s{slide_no}-pageno-position", slide_no, "page_number",
+                                            f"Page number position is ({left_in:.2f}\", {top_in:.2f}\"); "
+                                            f"should be in bottom-right (left >7.0\", top >6.0\").",
+                                            False, {}))
+                # Font check
+                _font_issues(sh, PAGENO_FONT, PAGENO_SIZE, "Page number", slide, slide_no,
+                             {"target": "shape", "shape_id": sh.shape_id},
+                             f"s{slide_no}-pageno", issues)
 
     head = heading_shape(slide)
     if head is None:
@@ -549,18 +645,23 @@ def _review_slide(slide, slide_no, canonical, issues):
     else:
         _font_issues(head, HEADING_FONT, HEADING_SIZE, "Heading", slide, slide_no,
                      {"target": "heading"}, f"s{slide_no}-heading", issues,
-                     want_bold=HEADING_BOLD, want_color=HEADING_COLOR)
+                     want_bold=HEADING_BOLD, want_color=HEADING_COLOR,
+                     want_italic=False, want_underline=False)
 
     for shp in slide.shapes:
-        if not shp.has_text_frame or not text_of(shp):
+        if not shp.has_text_frame:
             continue
         if is_pageno_carrier(shp) or is_marking_like(shp):
             continue
+        if is_title_ph(shp):
+            continue
         if head is not None and shp.shape_id == head.shape_id:
             continue
-        _font_issues(shp, BODY_FONT, BODY_SIZE, "Body text", slide, slide_no,
-                     {"target": "shape", "shape_id": shp.shape_id},
-                     f"s{slide_no}-body-{shp.shape_id}", issues, size_cmp="min")
+        # Check body placeholders even if empty, and all text boxes with content
+        if is_body_ph(shp) or text_of(shp):
+            _font_issues(shp, BODY_FONT, BODY_SIZE, "Body text", slide, slide_no,
+                         {"target": "shape", "shape_id": shp.shape_id},
+                         f"s{slide_no}-body-{shp.shape_id}", issues, size_cmp="min")
 
 
 def detect_marking_variant(prs):
@@ -750,6 +851,18 @@ def _apply_fix(slide, fix):
         if sh:
             for r in runs(sh):
                 r.font.color.rgb = RGBColor.from_string(fix["value"])
+    elif op == "font_italic":
+        sh = heading_shape(slide) if fix.get("target") == "heading" \
+            else _shape_by_id(slide, fix.get("shape_id"))
+        if sh:
+            for r in runs(sh):
+                r.font.italic = fix["value"]
+    elif op == "font_underline":
+        sh = heading_shape(slide) if fix.get("target") == "heading" \
+            else _shape_by_id(slide, fix.get("shape_id"))
+        if sh:
+            for r in runs(sh):
+                r.font.underline = fix["value"]
     elif op == "add_pageno":
         add_pageno(slide, fix["n"])
     elif op == "set_number":
@@ -760,6 +873,33 @@ def _apply_fix(slide, fix):
         sh = _shape_by_id(slide, fix.get("shape_id"))
         if sh:
             _set_pageno_value(sh, fix["value"])
+    elif op == "reset_pageno_position":
+        sh = _shape_by_id(slide, fix.get("shape_id"))
+        if sh:
+            sh.left = Inches(fix["left"])
+            sh.top = Inches(fix["top"])
+    elif op == "clear_pageno_formatting":
+        sh = _shape_by_id(slide, fix.get("shape_id"))
+        if sh:
+            try:
+                root = etree.fromstring(sh._element.xml.encode('utf-8'))
+                ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+                rPr = root.find(f".//{ns}rPr")
+                if rPr is not None:
+                    clear_type = fix.get("clear")
+                    if clear_type == "font":
+                        if (latin := rPr.find(f"{ns}latin")) is not None:
+                            rPr.remove(latin)
+                    elif clear_type == "size":
+                        if rPr.get('sz'):
+                            del rPr.attrib['sz']
+                    elif clear_type == "color":
+                        if (solidFill := rPr.find(f"{ns}solidFill")) is not None:
+                            rPr.remove(solidFill)
+                    # Rewrite the element
+                    sh._element.getparent().replace(sh._element, root)
+            except:
+                pass
     elif op == "add_marking":
         variant = _variant_by_id(fix["variant"])
         box = add_marking_box(slide, variant)
