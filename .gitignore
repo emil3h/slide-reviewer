@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Streamlit
+.streamlit/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local test/output data
+submitted_decks/
+corrected_*.pptx
+corrected_decks.zip
+*.tmp
+
+# Env / secrets
+.env

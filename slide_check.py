@@ -1,12 +1,14 @@
 """
 slide_check.py - formatting checker with per-issue, individually-applyable fixes.
 
-Rules (applied to every slide except the title slide, and skipping "Back-up Slides"
-dividers for font checks):
-  1. Page number present (typed number or slide-number placeholder), numbered in order.
-  2. CUI marking present, worded exactly, formatted Arial 8 bold no highlight.
-  3. Heading (top-most text box) Arial 24.
-  4. All other body text Arial 16.
+Rules (applied to every slide except the title slide, and skipping page-number/
+heading/body checks on "Back-up Slides" dividers):
+  1. Page number present, exactly one, Arial 8, numbered in order.
+  2. Exactly one approved control marking (Not-CUI footer or CUI header banner),
+     consistent deck-wide, worded exactly, formatted per its variant, no highlight.
+  3. Logo present top-left (within 0.25"), width >= 3" (applies even on dividers).
+  4. Heading (top-most text box) Arial 24 Bold.
+  5. All other body text Arial, >= 16pt.
 
 Public API used by app.py:
   review(prs) -> list[Issue]           # each Issue has .id, .slide, .message, .fixable
@@ -28,15 +30,26 @@ from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.oxml.ns import qn
 from pptx.enum.text import PP_ALIGN
-from pptx.enum.shapes import PP_PLACEHOLDER
+from pptx.enum.shapes import PP_PLACEHOLDER, MSO_SHAPE_TYPE
 
 # ---- rules -----------------------------------------------------------------
-HEADING_FONT, HEADING_SIZE = "Arial", 24.0
+HEADING_FONT, HEADING_SIZE, HEADING_BOLD = "Arial", 24.0, True
 BODY_FONT, BODY_SIZE = "Arial", 16.0
-CUI_TEXT = "Reviewed and determined not to contain CUI"
-CUI_FONT, CUI_SIZE = "Arial", 8.0
+PAGENO_FONT, PAGENO_SIZE = "Arial", 8.0
+PAGENO_ANCHOR_IN = (12.4, 6.95, 0.6, 0.3)
+LOGO_MIN_WIDTH_IN = 3.0
+LOGO_CORNER_TOLERANCE_IN = 0.25
+CUI_VARIANTS = [
+    {"id": "not_cui_footer", "label": "Not-CUI footer",
+     "text": "Reviewed and determined not to contain CUI",
+     "font": "Arial", "size": 8.0, "bold": True,
+     "anchor_in": (4.42, 6.95, 4.5, 0.3)},
+    {"id": "cui_header", "label": "CUI header banner",
+     "text": "CUI//SP-EXPT",
+     "font": "Arial", "size": 17.0, "bold": True,
+     "anchor_in": (5.14, 0.0, 3.04, 0.4)},
+]
 SKIP_FIRST_SLIDE = True
-TRUST_INHERITED = True
 MASTER_PROVIDES_PAGE_NUMBERS = False
 
 
@@ -132,21 +145,65 @@ def pageno_value(slide):
     return None
 
 
-def is_cui_exact(shape):
-    return norm(text_of(shape)) == norm(CUI_TEXT)
+def literal_pageno_shape(slide):
+    """A typed page-number text box (as opposed to an auto-updating slide-number
+    field, whose cached text python-pptx can't safely rewrite)."""
+    for s in slide.shapes:
+        if is_number_text(s) and not is_slidenum(s):
+            return s
+    return None
 
 
-def is_cui_like(shape):
-    return bool(text_of(shape)) and \
-        SequenceMatcher(None, norm(text_of(shape)), norm(CUI_TEXT)).ratio() > 0.7
+def _pageno_shapes(slide):
+    return [s for s in slide.shapes if is_pageno(s) or is_number_text(s) or is_slidenum(s)]
+
+
+def _variant_by_id(vid):
+    return next(v for v in CUI_VARIANTS if v["id"] == vid)
+
+
+def matching_variant(shape):
+    t = norm(text_of(shape))
+    if not t:
+        return None
+    for v in CUI_VARIANTS:
+        if t == norm(v["text"]):
+            return v
+    return None
+
+
+def closest_variant(shape):
+    t = text_of(shape)
+    if not t:
+        return None
+    best, best_ratio = None, 0.0
+    for v in CUI_VARIANTS:
+        ratio = SequenceMatcher(None, norm(t), norm(v["text"])).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = v, ratio
+    return best if best_ratio > 0.7 else None
+
+
+def is_marking_like(shape):
+    return closest_variant(shape) is not None
 
 
 def is_backup_divider(slide):
     texts = [text_of(s) for s in slide.shapes
              if s.has_text_frame and text_of(s)
-             and not is_pageno_carrier(s) and not is_cui_like(s)]
+             and not is_pageno_carrier(s) and not is_marking_like(s)]
     flat = re.sub(r"\s+", " ", " ".join(texts).lower().replace("-", " ")).strip()
     return flat in ("back up slides", "backup slides", "back up slide", "backup slide")
+
+
+def is_logo(shape):
+    if shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+        return False
+    if shape.left is None or shape.top is None or shape.width is None:
+        return False
+    return (Emu(shape.left).inches <= LOGO_CORNER_TOLERANCE_IN
+            and Emu(shape.top).inches <= LOGO_CORNER_TOLERANCE_IN
+            and Emu(shape.width).inches >= LOGO_MIN_WIDTH_IN)
 
 
 def _rPr(run):
@@ -175,6 +232,44 @@ def inherited_shapes(slide):
     except Exception:
         pass
     return out
+
+
+def has_logo(slide):
+    return any(is_logo(s) for s in slide.shapes) or \
+        any(is_logo(s) for s in inherited_shapes(slide))
+
+
+def _slide_marking_shapes(slide):
+    out = {}
+    for s in slide.shapes:
+        v = matching_variant(s)
+        if v and v["id"] not in out:
+            out[v["id"]] = s
+    return out
+
+
+def _slide_marking_ids(slide):
+    ids = set(_slide_marking_shapes(slide))
+    ids |= {v["id"] for s in inherited_shapes(slide) for v in [matching_variant(s)] if v}
+    return ids
+
+
+def _remove_variant_shapes(slide, variant):
+    """Delete every shape matching `variant` from the slide, its layout, and its
+    master. Removing from the master/layout affects every slide that shares it —
+    that's the intended, deck-wide effect of resolving a "both present" conflict."""
+    holders = [slide]
+    try:
+        layout = slide.slide_layout
+        holders.append(layout)
+        holders.append(layout.slide_master)
+    except Exception:
+        pass
+    for holder in holders:
+        for s in list(holder.shapes):
+            v = matching_variant(s)
+            if v is not None and v["id"] == variant["id"]:
+                s._element.getparent().remove(s._element)
 
 
 # ---- theme font-token resolution -------------------------------------------
@@ -219,7 +314,7 @@ def heading_shape(slide):
     for shp in slide.shapes:
         if not shp.has_text_frame or not text_of(shp):
             continue
-        if is_pageno_carrier(shp) or is_cui_like(shp) or shp.top is None:
+        if is_pageno_carrier(shp) or is_marking_like(shp) or shp.top is None:
             continue
         top = Emu(shp.top).inches
         if best_top is None or top < best_top:
@@ -228,7 +323,8 @@ def heading_shape(slide):
 
 
 # ---- review (produces Issues) ----------------------------------------------
-def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, idp, issues):
+def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, idp, issues,
+                  size_cmp="exact", want_bold=None):
     for r in runs(shape):
         name = effective_font_name(r.font.name, slide)
         if name is not None and name != want_font:
@@ -237,60 +333,128 @@ def _font_issues(shape, want_font, want_size, where, slide, slide_no, target, id
                                 {"op": "font_name", "value": want_font, **target}))
             break
     for r in runs(shape):
-        if r.font.size is not None and round(r.font.size.pt, 1) != want_size:
+        if r.font.size is None:
+            continue
+        size = round(r.font.size.pt, 1)
+        bad = size != want_size if size_cmp == "exact" else size < want_size
+        if bad:
+            rel = "exactly" if size_cmp == "exact" else "at least"
             issues.append(Issue(f"{idp}-size", slide_no, "size",
-                                f"{where} size is {round(r.font.size.pt,1)}pt; "
-                                f"should be {int(want_size)}pt.", True,
+                                f"{where} size is {size}pt; should be {rel} "
+                                f"{int(want_size)}pt.", True,
                                 {"op": "font_size", "value": want_size, **target}))
             break
+    if want_bold is not None:
+        for r in runs(shape):
+            if r.font.bold is not None and r.font.bold != want_bold:
+                issues.append(Issue(f"{idp}-bold", slide_no, "bold",
+                                    f"{where} is not bold; should be Bold.", True,
+                                    {"op": "font_bold", "value": want_bold, **target}))
+                break
 
 
-def _review_slide(slide, slide_no, issues):
-    # page number presence
+def _marking_format_defects(sh, variant, slide):
+    defects = []
+    rs = runs(sh)
+    for r in rs:
+        n = effective_font_name(r.font.name, slide)
+        if n is not None and n != variant["font"]:
+            defects.append(f"font {n}")
+            break
+    sizes = [round(r.font.size.pt, 1) for r in rs if r.font.size is not None]
+    if sizes and any(sz != variant["size"] for sz in sizes):
+        defects.append(f"not {int(variant['size'])}pt")
+    bolds = [r.font.bold for r in rs if r.font.bold is not None]
+    if bolds and not all(bolds):
+        defects.append("not bold")
+    if any(has_highlight(r) for r in rs):
+        defects.append("has highlight")
+    return defects
+
+
+def _review_marking(slide, slide_no, canonical, issues):
+    slide_variants = _slide_marking_shapes(slide)
+    effective_ids = _slide_marking_ids(slide)
+    marking_like = [s for s in slide.shapes
+                    if is_marking_like(s) and matching_variant(s) is None]
+
+    if len(effective_ids) > 1:
+        issues.append(Issue(f"s{slide_no}-marking-both", slide_no, "marking",
+                            "Both marking variants are present on this slide "
+                            "(inherited from the shared slide master); exactly one "
+                            "is required. Fixing this removes the other variant "
+                            "from the master, which resolves it deck-wide.", True,
+                            {"op": "resolve_marking_conflict", "keep": canonical["id"]}))
+    elif not effective_ids:
+        if marking_like:
+            issues.append(Issue(f"s{slide_no}-marking-wording", slide_no, "marking",
+                                f"Marking wording differs; must read exactly "
+                                f"\u201c{canonical['text']}\u201d.", True,
+                                {"op": "fix_marking_text", "shape_id": marking_like[0].shape_id,
+                                 "variant": canonical["id"]}))
+        else:
+            issues.append(Issue(f"s{slide_no}-marking-missing", slide_no, "marking",
+                                f"Missing required marking: \u201c{canonical['text']}\u201d.",
+                                True, {"op": "add_marking", "variant": canonical["id"]}))
+        return
+    else:
+        vid = next(iter(effective_ids))
+        if vid != canonical["id"]:
+            sh = slide_variants.get(vid)
+            issues.append(Issue(f"s{slide_no}-marking-variant", slide_no, "marking",
+                                f"Marking uses the \u201c{_variant_by_id(vid)['label']}\u201d "
+                                f"variant, but the deck's marking is "
+                                f"\u201c{canonical['label']}\u201d.",
+                                sh is not None,
+                                {"op": "fix_marking_text", "shape_id": sh.shape_id,
+                                 "variant": canonical["id"]} if sh is not None else {}))
+            return
+
+    # Format-check every slide-level marking shape present, independent of the
+    # both-present branch above \u2014 a marking can be both duplicated *and*
+    # incorrectly formatted (e.g. highlighted), and both need to be reported.
+    for vid, sh in slide_variants.items():
+        variant = _variant_by_id(vid)
+        defects = _marking_format_defects(sh, variant, slide)
+        if defects:
+            issues.append(Issue(f"s{slide_no}-marking-format-{vid}", slide_no, "marking",
+                                f"\u201c{variant['label']}\u201d marking formatting is off "
+                                f"({', '.join(defects)}); should be {variant['font']} "
+                                f"{int(variant['size'])}, bold, no highlight.", True,
+                                {"op": "fix_marking_format", "shape_id": sh.shape_id,
+                                 "variant": vid}))
+
+
+def _review_slide(slide, slide_no, canonical, issues):
+    divider = is_backup_divider(slide)
+
+    # marking and logo apply to every non-title slide, including back-up dividers
+    _review_marking(slide, slide_no, canonical, issues)
+
+    if not has_logo(slide):
+        issues.append(Issue(f"s{slide_no}-logo-missing", slide_no, "logo",
+                            "No logo found in the top-left corner (min width 3\").",
+                            False, {}))
+
+    # back-up divider: skip page-number/heading/body checks
+    if divider:
+        return
+
     if not has_pageno(slide):
         issues.append(Issue(f"s{slide_no}-pageno-missing", slide_no, "page_number",
                             "No page number found on the slide.", True,
                             {"op": "add_pageno", "n": slide_no}))
-
-    # CUI marking
-    slide_exact = [s for s in slide.shapes if is_cui_exact(s)]
-    slide_like = [s for s in slide.shapes if is_cui_like(s) and not is_cui_exact(s)]
-    if slide_exact:
-        sh = slide_exact[0]
-        defects = []
-        rs = runs(sh)
-        for r in rs:
-            n = effective_font_name(r.font.name, slide)
-            if n is not None and n != CUI_FONT:
-                defects.append(f"font {n}")
-                break
-        sizes = [round(r.font.size.pt, 1) for r in rs if r.font.size is not None]
-        if not sizes or any(sz != CUI_SIZE for sz in sizes):
-            defects.append("not 8pt")
-        if not all(r.font.bold for r in rs):
-            defects.append("not bold")
-        if any(has_highlight(r) for r in rs):
-            defects.append("has highlight")
-        if defects:
-            issues.append(Issue(f"s{slide_no}-cui-format", slide_no, "cui",
-                                f"CUI marking formatting is off ({', '.join(defects)}); "
-                                f"should be Arial 8, bold, no highlight.", True,
-                                {"op": "fix_cui_format", "shape_id": sh.shape_id}))
-    elif any(is_cui_exact(s) for s in inherited_shapes(slide)):
-        pass
-    elif slide_like:
-        issues.append(Issue(f"s{slide_no}-cui-wording", slide_no, "cui",
-                            f"CUI marking wording differs; must read exactly: "
-                            f"\u201c{CUI_TEXT}\u201d.", True,
-                            {"op": "fix_cui_text", "shape_id": slide_like[0].shape_id}))
     else:
-        issues.append(Issue(f"s{slide_no}-cui-missing", slide_no, "cui",
-                            f"Missing required CUI marking: \u201c{CUI_TEXT}\u201d.", True,
-                            {"op": "add_cui"}))
-
-    # section divider: skip heading/body font checks
-    if is_backup_divider(slide):
-        return
+        pn_shapes = _pageno_shapes(slide)
+        if len(pn_shapes) > 1:
+            issues.append(Issue(f"s{slide_no}-pageno-dup", slide_no, "page_number",
+                                f"{len(pn_shapes)} page-number elements found; "
+                                "exactly one is required.", False, {}))
+        elif pn_shapes and is_number_text(pn_shapes[0]) and not is_slidenum(pn_shapes[0]):
+            sh = pn_shapes[0]
+            _font_issues(sh, PAGENO_FONT, PAGENO_SIZE, "Page number", slide, slide_no,
+                         {"target": "shape", "shape_id": sh.shape_id},
+                         f"s{slide_no}-pageno", issues)
 
     head = heading_shape(slide)
     if head is None:
@@ -298,51 +462,73 @@ def _review_slide(slide, slide_no, issues):
                             "No heading text box found.", False, {}))
     else:
         _font_issues(head, HEADING_FONT, HEADING_SIZE, "Heading", slide, slide_no,
-                     {"target": "heading"}, f"s{slide_no}-heading", issues)
+                     {"target": "heading"}, f"s{slide_no}-heading", issues,
+                     want_bold=HEADING_BOLD)
 
     for shp in slide.shapes:
         if not shp.has_text_frame or not text_of(shp):
             continue
-        if is_pageno_carrier(shp) or is_cui_like(shp):
+        if is_pageno_carrier(shp) or is_marking_like(shp):
             continue
         if head is not None and shp.shape_id == head.shape_id:
             continue
         _font_issues(shp, BODY_FONT, BODY_SIZE, "Body text", slide, slide_no,
                      {"target": "shape", "shape_id": shp.shape_id},
-                     f"s{slide_no}-body-{shp.shape_id}", issues)
+                     f"s{slide_no}-body-{shp.shape_id}", issues, size_cmp="min")
 
 
-def _review_order(slides, start, issues):
-    anchor_pos = anchor_num = None
-    for idx, slide in enumerate(slides, start=1):
-        val = pageno_value(slide)
-        if val is None:
-            continue
-        if anchor_num is None:
-            anchor_pos, anchor_num = idx, val
-            continue
-        expected = anchor_num + (idx - anchor_pos)
-        if val != expected and idx >= start:
-            # find the typed number shape to renumber
-            sid = None
-            for s in slide.shapes:
-                if s.has_text_frame and re.fullmatch(r"\d{1,3}", text_of(s)):
-                    sid = s.shape_id
-                    break
-            issues.append(Issue(f"s{idx}-pageno-order", idx, "page_number",
-                                f"Page number is {val} but should be {expected} "
-                                f"for its position (out of order).", sid is not None,
-                                {"op": "set_number", "shape_id": sid, "value": expected}))
-
-
-def review(prs):
+def detect_marking_variant(prs):
+    """Best-guess deck-wide marking variant (majority vote across checked slides),
+    for callers that want to show/default to it before the user overrides it."""
     slides = list(prs.slides)
     start = 2 if SKIP_FIRST_SLIDE else 1
-    issues = []
+    return _deck_marking_variant(slides, start)["id"]
+
+
+def _deck_marking_variant(slides, start):
+    counts = {v["id"]: 0 for v in CUI_VARIANTS}
     for idx, slide in enumerate(slides, start=1):
         if idx < start:
             continue
-        _review_slide(slide, idx, issues)
+        for vid in _slide_marking_ids(slide):
+            counts[vid] += 1
+    best_id = max(counts, key=lambda vid: counts[vid])
+    return _variant_by_id(best_id) if counts[best_id] > 0 else CUI_VARIANTS[0]
+
+
+def _review_order(slides, start, issues):
+    checked = [(idx, slide) for idx, slide in enumerate(slides, start=1)
+               if idx >= start and not is_backup_divider(slide)]
+    anchor_pos = anchor_num = None
+    for pos, (idx, slide) in enumerate(checked):
+        sh = literal_pageno_shape(slide)
+        if sh is None:
+            continue
+        val = int(text_of(sh))
+        if anchor_num is None:
+            anchor_pos, anchor_num = pos, val
+            continue
+        expected = anchor_num + (pos - anchor_pos)
+        if val != expected:
+            issues.append(Issue(f"s{idx}-pageno-order", idx, "page_number",
+                                f"Page number is {val} but should be {expected} "
+                                f"for its position (out of order).", True,
+                                {"op": "set_number", "shape_id": sh.shape_id,
+                                 "value": expected}))
+
+
+def review(prs, marking_variant=None):
+    """marking_variant: id of the deck's intended marking (see CUI_VARIANTS) to
+    mandate deck-wide, or None to auto-detect it from the majority of slides."""
+    slides = list(prs.slides)
+    start = 2 if SKIP_FIRST_SLIDE else 1
+    issues = []
+    canonical = _variant_by_id(marking_variant) if marking_variant \
+        else _deck_marking_variant(slides, start)
+    for idx, slide in enumerate(slides, start=1):
+        if idx < start:
+            continue
+        _review_slide(slide, idx, canonical, issues)
     _review_order(slides, start, issues)
     issues.sort(key=lambda i: i.slide)
     return issues
@@ -366,28 +552,32 @@ def set_text(shape, new_text):
 
 
 def add_pageno(slide, n):
-    box = slide.shapes.add_textbox(Inches(9.0), Inches(7.0), Inches(0.6), Inches(0.3))
+    left, top, width, height = PAGENO_ANCHOR_IN
+    box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     box.text_frame.margin_left = 0
     box.text_frame.margin_top = 0
     r = box.text_frame.paragraphs[0].add_run()
-    r.text = str(n); r.font.name = "Arial"; r.font.size = Pt(12)
+    r.text = str(n)
+    r.font.name = PAGENO_FONT
+    r.font.size = Pt(PAGENO_SIZE)
     r.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
 
 
-def add_cui_box(slide):
-    box = slide.shapes.add_textbox(Inches(3.5), Inches(7.15), Inches(6.3), Inches(0.3))
+def add_marking_box(slide, variant):
+    left, top, width, height = variant["anchor_in"]
+    box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
     box.text_frame.margin_top = 0
     box.text_frame.margin_bottom = 0
     p = box.text_frame.paragraphs[0]
     p.alignment = PP_ALIGN.CENTER
-    p.add_run().text = CUI_TEXT
+    p.add_run().text = variant["text"]
     return box
 
 
-def format_cui_run(r):
-    r.font.name = CUI_FONT
-    r.font.size = Pt(CUI_SIZE)
-    r.font.bold = True
+def format_marking_run(r, variant):
+    r.font.name = variant["font"]
+    r.font.size = Pt(variant["size"])
+    r.font.bold = variant["bold"]
     remove_highlight(r)
 
 
@@ -412,27 +602,41 @@ def _apply_fix(slide, fix):
         if sh:
             for r in runs(sh):
                 r.font.size = Pt(fix["value"])
+    elif op == "font_bold":
+        sh = heading_shape(slide) if fix.get("target") == "heading" \
+            else _shape_by_id(slide, fix.get("shape_id"))
+        if sh:
+            for r in runs(sh):
+                r.font.bold = fix["value"]
     elif op == "add_pageno":
         add_pageno(slide, fix["n"])
     elif op == "set_number":
         sh = _shape_by_id(slide, fix.get("shape_id"))
         if sh:
             set_text(sh, str(fix["value"]))
-    elif op == "add_cui":
-        box = add_cui_box(slide)
+    elif op == "add_marking":
+        variant = _variant_by_id(fix["variant"])
+        box = add_marking_box(slide, variant)
         for r in runs(box):
-            format_cui_run(r)
-    elif op == "fix_cui_text":
+            format_marking_run(r, variant)
+    elif op == "fix_marking_text":
         sh = _shape_by_id(slide, fix.get("shape_id"))
+        variant = _variant_by_id(fix["variant"])
         if sh:
-            set_text(sh, CUI_TEXT)
+            set_text(sh, variant["text"])
             for r in runs(sh):
-                format_cui_run(r)
-    elif op == "fix_cui_format":
+                format_marking_run(r, variant)
+    elif op == "fix_marking_format":
         sh = _shape_by_id(slide, fix.get("shape_id"))
+        variant = _variant_by_id(fix["variant"])
         if sh:
             for r in runs(sh):
-                format_cui_run(r)
+                format_marking_run(r, variant)
+    elif op == "resolve_marking_conflict":
+        keep = fix.get("keep")
+        for other in CUI_VARIANTS:
+            if other["id"] != keep:
+                _remove_variant_shapes(slide, other)
 
 
 def apply_selected(prs, issues, ids):
@@ -448,13 +652,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("deck")
     ap.add_argument("--fix", action="store_true")
+    ap.add_argument("--marking", choices=[v["id"] for v in CUI_VARIANTS],
+                    help="Mandate the deck's approved marking variant instead of "
+                         "auto-detecting it from the majority of slides.")
     args = ap.parse_args()
     path = Path(args.deck)
     if not path.exists():
         sys.exit(f"File not found: {path}")
 
     prs = Presentation(str(path))
-    issues = review(prs)
+    issues = review(prs, marking_variant=args.marking)
     skipped = " (slide 1 skipped as the title slide)" if SKIP_FIRST_SLIDE else ""
     if not issues:
         print(f"No issues found. All checked slides pass{skipped}.")
