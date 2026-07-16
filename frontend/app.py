@@ -111,18 +111,74 @@ def review_path(path, marking_variant=None):
     prs = Presentation(str(path))
     return prs, sc.review(prs, marking_variant=marking_variant)
 
-def build_deck_context(deck_name, n_slides, issues, applied_ids=None):
+def build_slide_content(prs):
+    """Extract the actual text on each slide (heading + body), using the same
+    helpers the checker uses to identify shapes, so the chat model can answer
+    questions about slide *content* (e.g. 'what's the heading on slide 5?'),
+    not just the flagged formatting issues.
+
+    Slides are numbered 1-based to match the slide numbers used on issues.
+    """
+    out = {}
+    for idx, slide in enumerate(prs.slides, start=1):
+        head = sc.heading_shape(slide)
+        heading_text = sc.text_of(head) if head is not None else ""
+        # python-pptx returns a fresh wrapper object on every shape access, so
+        # identity (`is`) won't match — compare the underlying XML element.
+        head_el = head._element if head is not None else None
+
+        body_parts = []
+        for shp in slide.shapes:
+            if head_el is not None and shp._element is head_el:
+                continue
+            if not shp.has_text_frame:
+                continue
+            txt = sc.text_of(shp)
+            if not txt:
+                continue
+            # skip page numbers and marking banners — they're covered elsewhere
+            if sc.is_pageno_carrier(shp) or sc.is_marking_like(shp):
+                continue
+            body_parts.append(txt)
+
+        out[idx] = {"heading": heading_text, "body": body_parts}
+    return out
+
+
+def build_deck_context(deck_name, n_slides, issues, applied_ids=None, slide_content=None):
     """Turn the actual review results into text the chat model can reason
     over: every issue, which slide it's on, whether it's auto-fixable, and
-    (once the user has clicked Apply) which ones were actually applied."""
+    (once the user has clicked Apply) which ones were actually applied.
+
+    When `slide_content` (from build_slide_content) is provided, the actual
+    text of each slide is included too so the model can answer content
+    questions, not just formatting ones."""
     applied_ids = set(applied_ids or [])
     lines = [
         f"Deck name: {deck_name}",
         f"Total slides: {n_slides}",
         f"Total issues found: {len(issues)}",
-        "",
-        "Full list of issues (grouped by slide):",
     ]
+
+    if slide_content:
+        lines += ["", "Slide contents (actual text on each slide):"]
+        for idx in sorted(slide_content):
+            sc_entry = slide_content[idx]
+            heading = sc_entry["heading"] or "(no heading text box found)"
+            lines.append(f"\nSlide {idx}:")
+            lines.append(f"  Heading: {heading}")
+            if sc_entry["body"]:
+                lines.append("  Body text:")
+                for chunk in sc_entry["body"]:
+                    # keep each block readable; indent multi-line text
+                    first, *rest = chunk.splitlines() or [""]
+                    lines.append(f"    - {first}")
+                    for extra in rest:
+                        lines.append(f"      {extra}")
+            else:
+                lines.append("  Body text: (none)")
+
+    lines += ["", "Full list of issues (grouped by slide):"]
     if not issues:
         lines.append("(none — deck passes all checks)")
     else:
@@ -369,11 +425,13 @@ if prompt := st.chat_input("How can I improve my slides?"):
     with st.chat_message("assistant"):
         with st.spinner("ChatHPC is thinking..."):
             # Full issue list (+ whatever fixes have been applied so far this
-            # session), plus the running conversation, so the model actually
-            # knows what was found and can answer follow-up questions.
+            # session) and the actual slide text, plus the running
+            # conversation, so the model can answer both formatting and
+            # content questions about this specific deck.
             context = build_deck_context(
                 uploaded.name, n_slides, issues,
                 applied_ids=st.session_state.get("last_applied_ids", []),
+                slide_content=build_slide_content(prs),
             )
             response = get_chathpc_response(st.session_state.chat_history, context=context)
             st.markdown(response)
