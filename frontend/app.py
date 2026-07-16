@@ -111,6 +111,43 @@ def review_path(path, marking_variant=None):
     prs = Presentation(str(path))
     return prs, sc.review(prs, marking_variant=marking_variant)
 
+def get_chathpc_response(prompt, context=""):
+    """
+    Calls the ChatHPC API using credentials stored in st.secrets.
+    Includes truststore injection to handle JPL self-signed certificates.
+    """
+    import requests
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except ImportError:
+        # If truststore isn't installed, we'll try to proceed, but might hit SSL errors
+        pass
+    
+    api_key = st.secrets.get("CHATHPC_API_KEY")
+    endpoint = st.secrets.get("CHATHPC_API_ENDPOINT")
+    
+    if not api_key or not endpoint:
+        return "Error: ChatHPC API credentials not configured in `.streamlit/secrets.toml`."
+
+    try:
+        payload = {
+            "model": "gemma4:31b-128k",
+            "messages": [
+                {"role": "system", "content": f"You are a helpful assistant. Context: {context}"},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7,
+            "chat_template_kwargs": {"enable_thinking": True}
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        return response.json().get("choices", [{}])[0].get("message", {}).get("content", "No response content found.")
+    except Exception as e:
+        return f"ChatHPC Error: {str(e)}"
+
 
 def build_report(deck_name, n_slides, issues, applied_ids):
     """Plain-text summary of what was auto-fixed vs. what still needs a human
@@ -268,3 +305,33 @@ if st.button(f"Apply {len(selected)} selected fix(es)", key="apply-fixes-btn", t
     dl2.download_button("Download change report", data=report_text,
                        file_name=f"report_{Path(uploaded.name).stem}.txt",
                        mime="text/plain", use_container_width=True)
+
+st.divider()
+
+# ============================ CHATHPC AGENT ===================================
+st.subheader("Ask ChatHPC")
+st.info("Ask questions about the deck review or general slide formatting guidelines.", icon=":material/forum:")
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# Display chat history
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Chat input
+if prompt := st.chat_input("How can I improve my slides?"):
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+
+    # Get response from ChatHPC
+    with st.chat_message("assistant"):
+        with st.spinner("ChatHPC is thinking..."):
+            # Provide some context about the current deck
+            context = f"Deck Name: {uploaded.name}, Total Slides: {n_slides}, Issues Found: {len(issues)}"
+            response = get_chathpc_response(prompt, context=context)
+            st.markdown(response)
+    st.session_state.chat_history.append({"role": "assistant", "content": response})
