@@ -111,10 +111,42 @@ def review_path(path, marking_variant=None):
     prs = Presentation(str(path))
     return prs, sc.review(prs, marking_variant=marking_variant)
 
-def get_chathpc_response(prompt, context=""):
+def build_deck_context(deck_name, n_slides, issues, applied_ids=None):
+    """Turn the actual review results into text the chat model can reason
+    over: every issue, which slide it's on, whether it's auto-fixable, and
+    (once the user has clicked Apply) which ones were actually applied."""
+    applied_ids = set(applied_ids or [])
+    lines = [
+        f"Deck name: {deck_name}",
+        f"Total slides: {n_slides}",
+        f"Total issues found: {len(issues)}",
+        "",
+        "Full list of issues (grouped by slide):",
+    ]
+    if not issues:
+        lines.append("(none — deck passes all checks)")
+    else:
+        last_slide = None
+        for i in issues:
+            if i.slide != last_slide:
+                lines.append(f"\nSlide {i.slide}:")
+                last_slide = i.slide
+            status = "auto-fixable" if i.fixable else "requires manual fix"
+            if i.id in applied_ids:
+                status = "auto-fixable — FIX APPLIED by user"
+            lines.append(f"  - [{i.category}] {i.message} ({status})")
+
+    return "\n".join(lines)
+
+
+def get_chathpc_response(messages, context=""):
     """
     Calls the ChatHPC API using credentials stored in st.secrets.
     Includes truststore injection to handle JPL self-signed certificates.
+
+    `messages` is the full running chat history (list of {"role","content"}
+    dicts) so the model has both the deck context and prior turns, not just
+    the latest question in isolation.
     """
     import requests
     try:
@@ -130,19 +162,24 @@ def get_chathpc_response(prompt, context=""):
     if not api_key or not endpoint:
         return "Error: ChatHPC API credentials not configured in `.streamlit/secrets.toml`."
 
+    system_prompt = (
+        "You are a helpful assistant embedded in a PowerPoint compliance review tool. "
+        "Answer questions about the specific deck the user uploaded, using the issue "
+        "list below as ground truth. Don't invent issues that aren't listed, and be "
+        "specific about slide numbers when relevant.\n\n"
+        f"Context:\n{context}"
+    )
+
     try:
         payload = {
             "model": "gemma4:31b-128k",
-            "messages": [
-                {"role": "system", "content": f"You are a helpful assistant. Context: {context}"},
-                {"role": "user", "content": prompt}
-            ],
+            "messages": [{"role": "system", "content": system_prompt}] + messages,
             "temperature": 0.7,
             "chat_template_kwargs": {"enable_thinking": True}
         }
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         
-        response = requests.post(endpoint, json=payload, headers=headers, timeout=15)
+        response = requests.post(endpoint, json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         return response.json().get("choices", [{}])[0].get("message", {}).get("content", "No response content found.")
     except Exception as e:
@@ -292,6 +329,7 @@ if st.button(f"Apply {len(selected)} selected fix(es)", key="apply-fixes-btn", t
         sc.apply_selected(prs, issues, selected)
         buf = io.BytesIO()
         prs.save(buf)
+    st.session_state["last_applied_ids"] = selected
     st.toast(f"Applied {len(selected)} fix(es)", icon=":material/check_circle:")
     st.success(f"Applied {len(selected)} fix(es).", icon=":material/check_circle:")
 
@@ -330,8 +368,13 @@ if prompt := st.chat_input("How can I improve my slides?"):
     # Get response from ChatHPC
     with st.chat_message("assistant"):
         with st.spinner("ChatHPC is thinking..."):
-            # Provide some context about the current deck
-            context = f"Deck Name: {uploaded.name}, Total Slides: {n_slides}, Issues Found: {len(issues)}"
-            response = get_chathpc_response(prompt, context=context)
+            # Full issue list (+ whatever fixes have been applied so far this
+            # session), plus the running conversation, so the model actually
+            # knows what was found and can answer follow-up questions.
+            context = build_deck_context(
+                uploaded.name, n_slides, issues,
+                applied_ids=st.session_state.get("last_applied_ids", []),
+            )
+            response = get_chathpc_response(st.session_state.chat_history, context=context)
             st.markdown(response)
     st.session_state.chat_history.append({"role": "assistant", "content": response})
