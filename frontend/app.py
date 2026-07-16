@@ -6,7 +6,6 @@ Run from the repo root:
 """
 import io
 import sys
-import zipfile
 import tempfile
 from itertools import groupby
 from pathlib import Path
@@ -90,13 +89,6 @@ def review_path(path, marking_variant=None):
     return prs, sc.review(prs, marking_variant=marking_variant)
 
 
-def fix_all_bytes(path):
-    prs = Presentation(str(path))
-    issues = sc.review(prs)
-    sc.apply_selected(prs, issues, [i.id for i in issues if i.fixable])
-    buf = io.BytesIO()
-    prs.save(buf)
-    return buf.getvalue()
 
 
 header_logo, header_title = st.columns([1, 5], vertical_alignment="center")
@@ -106,171 +98,94 @@ header_title.title("Slide Reviewer")
 st.caption("Checks each deck against the template rules (headings, body text, page "
            "numbers, markings) and lets you approve fixes one by one.")
 
-mode = st.radio("Mode", ["Single deck (upload)", "Batch (local folder)"], horizontal=True)
-
 # ============================ SINGLE DECK ===================================
-if mode == "Single deck (upload)":
-    uploaded = st.file_uploader("Upload a presentation (.pptx)", type="pptx")
-    if uploaded is None:
-        st.info("Upload a .pptx to begin.")
-        st.stop()
+uploaded = st.file_uploader("Upload a presentation (.pptx)", type="pptx")
+if uploaded is None:
+    st.info("Upload a .pptx to begin.")
+    st.stop()
 
-    # persist the upload to a temp file so it survives Streamlit reruns
-    if st.session_state.get("deck_name") != uploaded.name:
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pptx")
-        tmp.write(uploaded.getbuffer())
-        tmp.flush()
-        st.session_state["deck_path"] = tmp.name
-        st.session_state["deck_name"] = uploaded.name
-        st.session_state["marking_choice"] = "auto"  # reset override for the new deck
+# persist the upload to a temp file so it survives Streamlit reruns
+if st.session_state.get("deck_name") != uploaded.name:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pptx")
+    tmp.write(uploaded.getbuffer())
+    tmp.flush()
+    st.session_state["deck_path"] = tmp.name
+    st.session_state["deck_name"] = uploaded.name
+    st.session_state["marking_choice"] = "auto"  # reset override for the new deck
 
-    variant_labels = {v["id"]: v["label"] for v in sc.CUI_VARIANTS}
-    detected = sc.detect_marking_variant(Presentation(st.session_state["deck_path"]))
-    choice = st.selectbox(
-        "This deck's approved marking",
-        ["auto"] + list(variant_labels),
-        format_func=lambda vid: f"Auto-detect (currently: {variant_labels[detected]})"
-                                 if vid == "auto" else variant_labels[vid],
-        key="marking_choice",
-        help="The deck must use exactly one marking variant throughout. Pick it once "
-             "here and every slide is checked against it.")
-    marking_variant = None if choice == "auto" else choice
+variant_labels = {v["id"]: v["label"] for v in sc.CUI_VARIANTS}
+detected = sc.detect_marking_variant(Presentation(st.session_state["deck_path"]))
+choice = st.selectbox(
+    "This deck's approved marking",
+    ["auto"] + list(variant_labels),
+    format_func=lambda vid: f"Auto-detect (currently: {variant_labels[detected]})"
+                              if vid == "auto" else variant_labels[vid],
+    key="marking_choice",
+    help="The deck must use exactly one marking variant throughout. Pick it once "
+         "here and every slide is checked against it.")
+marking_variant = None if choice == "auto" else choice
 
-    prs, issues = review_path(st.session_state["deck_path"], marking_variant)
-    n_slides = len(list(prs.slides))
-    st.subheader(f"{uploaded.name} \u2014 {n_slides} slides")
+prs, issues = review_path(st.session_state["deck_path"], marking_variant)
+n_slides = len(list(prs.slides))
+st.subheader(f"{uploaded.name} \u2014 {n_slides} slides")
 
-    if not issues:
-        st.success("No issues found. This deck passes all checks.")
-        st.stop()
+if not issues:
+    st.success("No issues found. This deck passes all checks.")
+    st.stop()
 
-    fixable_ids = [i.id for i in issues if i.fixable]
+fixable_ids = [i.id for i in issues if i.fixable]
+for iid in fixable_ids:
+    st.session_state.setdefault(iid, True)
+
+n_fixable = len(fixable_ids)
+n_manual = len(issues) - n_fixable
+
+m1, m2, m3 = st.columns(3)
+m1.metric("Issues found", len(issues))
+m2.metric("Auto-fixable", n_fixable)
+m3.metric("Manual", n_manual)
+st.caption("Untick anything below you don't want changed.")
+
+c1, c2, c3 = st.columns([1, 1, 2])
+if c1.button("Select all", use_container_width=True):
     for iid in fixable_ids:
-        st.session_state.setdefault(iid, True)
+        st.session_state[iid] = True
+    st.toast("All fixable issues selected")
+if c2.button("Clear all", use_container_width=True):
+    for iid in fixable_ids:
+        st.session_state[iid] = False
+    st.toast("All selections cleared")
 
-    n_fixable = len(fixable_ids)
-    n_manual = len(issues) - n_fixable
+hide_compliant = c3.checkbox("Hide compliant slides", value=False)
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Issues found", len(issues))
-    m2.metric("Auto-fixable", n_fixable)
-    m3.metric("Manual", n_manual)
-    st.caption("Untick anything below you don't want changed.")
+st.divider()
 
-    c1, c2, c3 = st.columns([1, 1, 2])
-    if c1.button("Select all", use_container_width=True):
-        for iid in fixable_ids:
-            st.session_state[iid] = True
-        st.toast("All fixable issues selected")
-    if c2.button("Clear all", use_container_width=True):
-        for iid in fixable_ids:
-            st.session_state[iid] = False
-        st.toast("All selections cleared")
+# render checkboxes grouped by slide, one card per slide
+for slide_no, slide_issues in groupby(issues, key=lambda i: i.slide):
+    slide_issues = list(slide_issues)
     
-    hide_compliant = c3.checkbox("Hide compliant slides", value=False)
+    if hide_compliant and not slide_issues:
+        continue
+        
+    with st.container(border=True):
+        st.markdown(f"**Slide {slide_no}**")
+        for i in slide_issues:
+            if i.fixable:
+                st.checkbox(i.message, key=i.id)
+            else:
+                st.warning(f"**Manual Fix Required:** {i.message}")
 
-    st.divider()
+st.divider()
+selected = [i.id for i in issues if i.fixable and st.session_state.get(i.id)]
+if st.button(f"Apply {len(selected)} selected fix(es)", type="primary",
+             disabled=not selected, use_container_width=True):
+    with st.spinner("Applying fixes..."):
+        sc.apply_selected(prs, issues, selected)
+        buf = io.BytesIO()
+        prs.save(buf)
+    st.success(f"Applied {len(selected)} fix(es).")
+    st.download_button("Download corrected deck", data=buf.getvalue(),
+                       file_name=f"corrected_{uploaded.name}",
+                       mime="application/vnd.openxmlformats-officedocument."
+                             "presentationml.presentation")
 
-    # render checkboxes grouped by slide, one card per slide
-    for slide_no, slide_issues in groupby(issues, key=lambda i: i.slide):
-        slide_issues = list(slide_issues)
-        
-        if hide_compliant and not slide_issues:
-            continue
-            
-        with st.container(border=True):
-            st.markdown(f"**Slide {slide_no}**")
-            for i in slide_issues:
-                if i.fixable:
-                    st.checkbox(i.message, key=i.id)
-                else:
-                    st.warning(f"**Manual Fix Required:** {i.message}")
-
-    st.divider()
-    selected = [i.id for i in issues if i.fixable and st.session_state.get(i.id)]
-    if st.button(f"Apply {len(selected)} selected fix(es)", type="primary",
-                 disabled=not selected, use_container_width=True):
-        with st.spinner("Applying fixes..."):
-            sc.apply_selected(prs, issues, selected)
-            buf = io.BytesIO()
-            prs.save(buf)
-        st.success(f"Applied {len(selected)} fix(es).")
-        st.download_button("Download corrected deck", data=buf.getvalue(),
-                           file_name=f"corrected_{uploaded.name}",
-                           mime="application/vnd.openxmlformats-officedocument."
-                                 "presentationml.presentation")
-
-# ============================ BATCH FOLDER ==================================
-else:
-    folder = st.text_input("Folder containing .pptx decks", value="submitted_decks")
-    if not folder:
-        st.stop()
-    path = Path(folder)
-    if not path.exists():
-        st.error(f"Folder not found: {path.resolve()}")
-        st.stop()
-    decks = sorted(path.glob("*.pptx"))
-    if not decks:
-        st.warning("No .pptx files found there.")
-        st.stop()
-
-    st.caption(f"Found {len(decks)} deck(s) in this folder.")
-    if st.button("Review all decks", type="primary", use_container_width=True):
-        rows = []
-        progress = st.progress(0.0)
-        for i, deck in enumerate(decks, start=1):
-            _, issues = review_path(deck)
-            rows.append({"Deck": deck.name, "Issues": len(issues), "Selected": True})
-            progress.progress(i / len(decks))
-        st.session_state["batch_rows"] = rows
-        st.session_state["batch_folder"] = str(path)
-        st.toast("Batch review complete!")
-
-    if "batch_rows" in st.session_state:
-        rows = st.session_state["batch_rows"]
-        
-        st.subheader("Summary")
-        m1, m2 = st.columns(2)
-        m1.metric("Decks reviewed", len(rows))
-        m2.metric("Total issues", sum(r["Issues"] for r in rows))
-        
-        # Granular Selection
-        st.write("Select decks to include in the final fix:")
-        updated_rows = []
-        for row in rows:
-            col1, col2 = st.columns([1, 4])
-            selected = col1.checkbox("Fix", value=row["Selected"], key=f"batch_sel_{row['Deck']}")
-            col2.write(f"**{row['Deck']}** — {row['Issues']} issues")
-            updated_rows.append({**row, "Selected": selected})
-        
-        st.session_state["batch_rows"] = updated_rows
-        
-        st.divider()
-        
-        selected_decks = [r["Deck"] for r in updated_rows if r["Selected"]]
-        
-        if st.button(f"Apply fixes to {len(selected_decks)} selected deck(s) & download zip",
-                     type="primary", use_container_width=True,
-                     disabled=not selected_decks):
-            with st.spinner("Applying fixes and compressing..."):
-                zbuf = io.BytesIO()
-                fp = Path(st.session_state["batch_folder"])
-                
-                # Use the specific filtered list of decks
-                all_files = sorted(fp.glob("*.pptx"))
-                for deck in all_files:
-                    if deck.name in selected_decks:
-                        zf_content = fix_all_bytes(deck)
-                        # Need to open a new zip or manage the buffer carefully
-                        pass
-                
-                # Redoing the zip logic to be cleaner with the selection
-                with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for deck in all_files:
-                        if deck.name in selected_decks:
-                            zf.writestr(f"corrected_{deck.name}", fix_all_bytes(deck))
-                            
-                st.success(f"Processed {len(selected_decks)} decks.")
-                st.download_button("Download corrected decks (zip)",
-                                   data=zbuf.getvalue(), file_name="corrected_decks.zip",
-                                   mime="application/zip")
