@@ -13,8 +13,12 @@ venv/
 env/
 ENV/
 
-# Streamlit
-.streamlit/
+# Streamlit (config.toml is intentionally tracked for the app's theme)
+.streamlit/secrets.toml
+
+# Streamlit agent skills (environment-specific symlinks)
+.agents/skills/developing-with-streamlit
+.claude/skills/developing-with-streamlit
 
 # Editors / OS
 .vscode/
