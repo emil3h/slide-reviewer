@@ -466,10 +466,7 @@ def _review_marking(slide, slide_no, canonical, issues):
 
     if len(effective_ids) > 1:
         issues.append(Issue(f"s{slide_no}-marking-both", slide_no, "marking",
-                            "Both marking variants are present on this slide "
-                            "(inherited from the shared slide master); exactly one "
-                            "is required. Fixing this removes the other variant "
-                            "from the master, which resolves it deck-wide.", True,
+                            "Both marking variants detected. Please select the correct deck marking below.", True,
                             {"op": "resolve_marking_conflict", "keep": canonical["id"]}))
     elif not effective_ids:
         if marking_like:
