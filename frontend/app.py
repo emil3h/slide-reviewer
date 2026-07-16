@@ -111,20 +111,14 @@ if st.session_state.get("deck_name") != uploaded.name:
     tmp.flush()
     st.session_state["deck_path"] = tmp.name
     st.session_state["deck_name"] = uploaded.name
-    st.session_state["marking_choice"] = "auto"  # reset override for the new deck
+    # Auto-detect marking for the new deck
+    detected = sc.detect_marking_variant(Presentation(st.session_state["deck_path"]))
+    st.session_state["marking_choice"] = detected
+elif "marking_choice" not in st.session_state:
+    detected = sc.detect_marking_variant(Presentation(st.session_state["deck_path"]))
+    st.session_state["marking_choice"] = detected
 
-variant_labels = {v["id"]: v["label"] for v in sc.CUI_VARIANTS}
-detected = sc.detect_marking_variant(Presentation(st.session_state["deck_path"]))
-choice = st.selectbox(
-    "This deck's approved marking",
-    ["auto"] + list(variant_labels),
-    format_func=lambda vid: f"Auto-detect (currently: {variant_labels[detected]})"
-                              if vid == "auto" else variant_labels[vid],
-    key="marking_choice",
-    help="The deck must use exactly one marking variant throughout. Pick it once "
-         "here and every slide is checked against it.")
-marking_variant = None if choice == "auto" else choice
-
+marking_variant = st.session_state["marking_choice"]
 prs, issues = review_path(st.session_state["deck_path"], marking_variant)
 n_slides = len(list(prs.slides))
 st.subheader(f"{uploaded.name} \u2014 {n_slides} slides")
@@ -177,6 +171,19 @@ for slide_no, slide_issues in groupby(issues, key=lambda i: i.slide):
 
 st.divider()
 selected = [i.id for i in issues if i.fixable and st.session_state.get(i.id)]
+custom_labels = {v["id"]: v["label"] for v in sc.CUI_VARIANTS}
+# Override with user-requested labels
+custom_labels["not_cui_footer"] = "Reviewed and determined not to contain CUI"
+custom_labels["cui_header"] = "CUI header banner"
+
+st.selectbox(
+    "Approved marking for this deck",
+    options=list(custom_labels.keys()),
+    format_func=lambda x: custom_labels[x],
+    key="marking_choice",
+    help="The deck must use exactly one marking variant throughout. Changing this will re-run the review."
+)
+
 if st.button(f"Apply {len(selected)} selected fix(es)", type="primary",
              disabled=not selected, use_container_width=True):
     with st.spinner("Applying fixes..."):
