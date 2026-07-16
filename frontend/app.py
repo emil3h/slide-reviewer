@@ -7,6 +7,7 @@ Run from the repo root:
 import io
 import sys
 import tempfile
+from datetime import datetime
 from itertools import groupby
 from pathlib import Path
 
@@ -109,6 +110,43 @@ with st.sidebar:
 def review_path(path, marking_variant=None):
     prs = Presentation(str(path))
     return prs, sc.review(prs, marking_variant=marking_variant)
+
+
+def build_report(deck_name, n_slides, issues, applied_ids):
+    """Plain-text summary of what was auto-fixed vs. what still needs a human
+    to go into PowerPoint, grouped by slide."""
+    applied_ids = set(applied_ids)
+    implemented = [i for i in issues if i.id in applied_ids]
+    manual = [i for i in issues if i.id not in applied_ids]
+
+    lines = [
+        "SLIDE REVIEWER — CHANGE REPORT",
+        f"Deck: {deck_name} ({n_slides} slides)",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+    ]
+
+    def section(title, items, note_unselected=False):
+        lines.append(f"{title} ({len(items)})")
+        lines.append("=" * (len(title) + len(str(len(items))) + 3))
+        if not items:
+            lines.append("(none)")
+        else:
+            last = None
+            for i in items:
+                if i.slide != last:
+                    lines.append(f"\nSlide {i.slide}:")
+                    last = i.slide
+                tag = ""
+                if note_unselected and i.fixable:
+                    tag = "  [auto-fixable, but was left unselected]"
+                lines.append(f"  - {i.message}{tag}")
+        lines.append("")
+
+    section("IMPLEMENTED FIXES", implemented)
+    section("NEEDS MANUAL ACTION", manual, note_unselected=True)
+
+    return "\n".join(lines)
 
 
 
@@ -219,7 +257,14 @@ if st.button(f"Apply {len(selected)} selected fix(es)", key="apply-fixes-btn", t
         prs.save(buf)
     st.toast(f"Applied {len(selected)} fix(es)", icon=":material/check_circle:")
     st.success(f"Applied {len(selected)} fix(es).", icon=":material/check_circle:")
-    st.download_button("Download corrected deck", data=buf.getvalue(),
+
+    dl1, dl2 = st.columns(2)
+    dl1.download_button("Download corrected deck", data=buf.getvalue(),
                        file_name=f"corrected_{uploaded.name}",
                        mime="application/vnd.openxmlformats-officedocument."
-                             "presentationml.presentation")
+                             "presentationml.presentation",
+                       use_container_width=True)
+    report_text = build_report(uploaded.name, n_slides, issues, selected)
+    dl2.download_button("Download change report", data=report_text,
+                       file_name=f"report_{Path(uploaded.name).stem}.txt",
+                       mime="text/plain", use_container_width=True)
